@@ -4,6 +4,16 @@
 
 这是可运行的 **0.1 版本**，API 参考 PDF.js 的文档/页面/渲染任务分层，目前不具备 PDF.js 同等的格式覆盖率与成熟度。无需服务端转换，本地文件不上传。
 
+## 安装
+
+```bash
+npm install @ofdjs/viewer
+# 使用 React 阅读器时，还需在应用中安装 React
+npm install react react-dom
+```
+
+[npm 包](https://www.npmjs.com/package/@ofdjs/viewer) · [GitHub 仓库](https://github.com/Atw-Lee/ofdjs-viewer)
+
 ## 启动与构建
 
 需要 Node.js 20.19+。
@@ -13,14 +23,14 @@ npm install
 npm run dev             # http://127.0.0.1:5173
 npm run build           # dist/，用于集成的库
 npm run build:demo      # demo-dist/，静态演示应用
-npm pack                # 可安装的 npm 压缩包；尚未发布到 npm
+npm pack                # 生成可安装的 npm 压缩包
 ```
 
 仓库自带两页 `public/sample.ofd`，通过 `npm run sample` 重新生成。演示支持打开文件、拖放、翻页、缩放、适合宽度、旋转与兼容性提示。
 
 ## 原生 JavaScript
 
-在其他项目安装 `npm pack` 生成的包，然后：
+安装 `@ofdjs/viewer` 后：
 
 ```js
 import { getDocument } from '@ofdjs/viewer';
