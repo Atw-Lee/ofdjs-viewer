@@ -2,6 +2,19 @@
   "name": "@ofdjs/viewer",
   "version": "0.1.0",
   "description": "Browser-native OFD parser, Canvas renderer and React viewer",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "keywords": ["ofd", "canvas", "react", "viewer", "document"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Atw-Lee/ofdjs-viewer.git"
+  },
+  "homepage": "https://github.com/Atw-Lee/ofdjs-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/Atw-Lee/ofdjs-viewer/issues"
+  },
   "type": "module",
   "files": [
     "dist",

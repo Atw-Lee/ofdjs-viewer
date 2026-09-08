@@ -5,3 +5,10 @@ test-results/
 playwright-report/
 .DS_Store
 *.tgz
+*.log
+.npmrc
+.env
+.env.*
+coverage/
+*.ofd
+!public/sample.ofd
