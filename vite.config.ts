@@ -1,2 +1,5 @@
 import { defineConfig } from 'vite';
-export default defineConfig({ build: { outDir: 'demo-dist' } });
+export default defineConfig({
+  base: process.env.VITE_BASE_PATH || '/',
+  build: { outDir: 'demo-dist' },
+});

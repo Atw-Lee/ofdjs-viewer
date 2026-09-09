@@ -28,6 +28,24 @@ npm pack                # 生成可安装的 npm 压缩包
 
 仓库自带两页 `public/sample.ofd`，通过 `npm run sample` 重新生成。演示支持打开文件、拖放、翻页、缩放、适合宽度、旋转与兼容性提示。
 
+## GitHub Pages 部署
+
+在仓库 **Settings → Pages → Build and deployment → Source** 中选择 **GitHub Actions**，然后推送 `main`，或在 Actions 中手动运行 **Deploy OFD demo to GitHub Pages**。
+
+工作流检查类型、运行核心测试，并将 `demo-dist/` 发布到 Pages。部署根路径从 Pages 配置获取，页面资源、首页链接和示例 OFD 使用同一个路径前缀。
+
+本仓库的预览地址为 https://atw-lee.github.io/ofdjs-viewer/ 。自行 fork 后请使用自己仓库 Pages 设置显示的地址。
+
+本地验证子路径构建：
+
+```bash
+VITE_BASE_PATH=/ofdjs-viewer/ npm run build:demo
+VITE_BASE_PATH=/ofdjs-viewer/ npx vite preview
+# 打开 http://localhost:4173/ofdjs-viewer/
+```
+
+普通根目录部署执行 `npm run build:demo` 即可。此工作流仅发布预览站点，npm 包使用独立发布流程。
+
 ## 原生 JavaScript
 
 安装 `@ofdjs/viewer` 后：
