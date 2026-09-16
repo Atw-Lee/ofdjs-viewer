@@ -136,6 +136,8 @@ export function Preview({ file }: { file: File | null }) {
 
 回归测试使用自生成数据覆盖页面尺寸独立声明、默认尺寸继承、页面覆盖默认值及两处都缺失的情况。用户业务原件不放入仓库或发布包。
 
+部分生成器还会为有文字内容的 `TextObject` 写入 `Boundary="0 0 0 0"`（或宽、高之一为零）。预览器保留 Boundary 原点、CTM 和 TextCode 坐标，取消该文字对象的矩形边界裁剪，并通过 `ZERO_TEXT_BOUNDARY` 提示可能的显示范围差异；文字提取保留原边界框。其他对象的零尺寸 Boundary 仍按空矩形裁剪，页面 PhysicalBox 仍要求宽、高均大于零；负尺寸、非有限数值和不完整边界框仍会报错。自生成回归用例覆盖实际文字像素、后续对象绘制和文字提取，外部业务文件仅用于本地验证。
+
 ## 资源限制
 
 `getDocument(source, options)` 可配置：

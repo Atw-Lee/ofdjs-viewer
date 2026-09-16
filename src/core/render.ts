@@ -1,5 +1,5 @@
 import type { OFDPage, Resources } from './document.js';
-import { box, child, children, colorNumbers, expandDeltas, numberAttr, numbers, value } from './xml.js';
+import { boundary, child, children, colorNumbers, expandDeltas, numberAttr, numbers, value } from './xml.js';
 import { drawPath } from './path.js';
 export interface Viewport { width: number; height: number; scale: number; rotation: number; unit: number; }
 export interface RenderOptions { canvasContext: CanvasRenderingContext2D; viewport: Viewport; pixelRatio?: number; background?: string; signal?: AbortSignal; maxCanvasPixels?: number; }
@@ -56,8 +56,13 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
           ctx.save();
           try {
             if (el.hasAttribute('Boundary') && (type.endsWith('Object') || type === 'Appearance')) {
-              const [x, y, w, h] = box(el.getAttribute('Boundary')); ctx.translate(x, y);
-              ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
+              const [x, y, w, h] = boundary(el.getAttribute('Boundary')); ctx.translate(x, y);
+              if (type === 'TextObject' && (w === 0 || h === 0)) {
+                // Some producers retain TextCode/CTM but emit an empty boundary.
+                warn('ZERO_TEXT_BOUNDARY', 'Text with a zero-size Boundary is rendered without boundary clipping; its extent may differ from the source.');
+              } else {
+                ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
+              }
             }
             const ctm = numbers(el.getAttribute('CTM'));
             if (ctm.length) { if (ctm.length !== 6) throw new Error('Invalid CTM'); ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5]); }
@@ -150,7 +155,7 @@ function applyClips(ctx: CanvasRenderingContext2D, el: Element, warn: Warn) {
       for (const path of children(area)) {
         if (path.localName !== 'Path') { warn('TEXT_CLIP', 'Text clipping shapes are not supported.'); continue; }
         const transform = new DOMMatrix(Array.from(matrix.toFloat64Array()));
-        if (path.hasAttribute('Boundary')) { const [x, y] = box(path.getAttribute('Boundary')); transform.translateSelf(x, y); }
+        if (path.hasAttribute('Boundary')) { const [x, y] = boundary(path.getAttribute('Boundary')); transform.translateSelf(x, y); }
         const ctm = numbers(path.getAttribute('CTM')); if (ctm.length === 6) transform.multiplySelf(new DOMMatrix(ctm));
         const shape = new Path2D(); drawPath(shape, value(path, 'AbbreviatedData'));
         combined.addPath(shape, transform); supported = true;

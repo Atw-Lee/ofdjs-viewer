@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { strToU8, zipSync, unzipSync, strFromU8 } from 'fflate';
 import { getDocument } from '../src/index';
-import { expandDeltas, resolvePath, parseXML, colorNumbers } from '../src/core/xml';
+import { boundary, box, expandDeltas, resolvePath, parseXML, colorNumbers } from '../src/core/xml';
 import { drawPath } from '../src/core/path';
 const sample = new Uint8Array(readFileSync('public/sample.ofd'));
 describe('OFD archive and page model', () => {
@@ -48,6 +48,22 @@ describe('OFD archive and page model', () => {
     await expect(doc.getPage(1)).rejects.toThrow('Page 1 has no PhysicalBox');
     doc.destroy();
   });
+  it('extracts text with a zero-size boundary without changing its coordinates', async () => {
+    const files = unzipSync(sample);
+    files['Doc_0/Pages/1.xml'] = strToU8('<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016"><ofd:Content><ofd:Layer ID="10"><ofd:TextObject ID="11" Boundary="0 0 0 0" Font="1" Size="5" CTM="2 0 0 2 0 0"><ofd:TextCode X="10" Y="20">Retained text</ofd:TextCode></ofd:TextObject></ofd:Layer></ofd:Content></ofd:Page>');
+    const doc = await getDocument(zipSync(files));
+    expect((await (await doc.getPage(1)).getTextContent()).items).toEqual([{ text: 'Retained text', boundary: [0, 0, 0, 0], font: '1', size: 5 }]);
+    doc.destroy();
+  });
+  it('still rejects zero-size physical pages', async () => {
+    const files = unzipSync(sample);
+    files['Doc_0/Pages/1.xml'] = strToU8('<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016"><ofd:Area><ofd:PhysicalBox>0 0 0 0</ofd:PhysicalBox></ofd:Area></ofd:Page>');
+    const doc = await getDocument(zipSync(files));
+    await expect(doc.getPage(1)).rejects.toThrow('Invalid OFD box: 0 0 0 0');
+    doc.destroy();
+    files['Doc_0/Document.xml'] = strToU8(strFromU8(files['Doc_0/Document.xml']).replace('0 0 210 297', '0 0 0 0'));
+    await expect(getDocument(zipSync(files))).rejects.toThrow('Invalid OFD box: 0 0 0 0');
+  });
   it('rejects malformed archives and missing root', async () => {
     await expect(getDocument(new Uint8Array([1, 2, 3]))).rejects.toThrow();
     await expect(getDocument(zipSync({ 'test.xml': strToU8('<Test/>') })) ).rejects.toThrow('OFD.xml');
@@ -64,6 +80,15 @@ describe('OFD archive and page model', () => {
   });
 });
 describe('OFD primitives', () => {
+  it('accepts zero object extents while rejecting malformed boundaries and page boxes', () => {
+    for (const raw of ['0 0 0 0', '10 20 0 5', '10 20 5 0']) {
+      expect(boundary(raw)).toEqual(raw.split(' ').map(Number));
+      expect(() => box(raw)).toThrow('Invalid OFD box');
+    }
+    for (const raw of [null, '', '0 0 5', '0 0 5 5 5', '0 0 -1 5', '0 0 5 -1', '0 0 NaN 5', '0 0 Infinity 5']) {
+      expect(() => boundary(raw)).toThrow();
+    }
+  });
   it('resolves package absolute paths and normalizes separators without traversal', () => {
     expect(resolvePath('Doc/Pages/1.xml', '../../Res/a.png')).toBe('Res/a.png');
     expect(resolvePath('Doc/a.xml', '/Doc/Res/a.png')).toBe('Doc/Res/a.png');

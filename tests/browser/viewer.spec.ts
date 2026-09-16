@@ -54,6 +54,43 @@ test('cancels rendering and isolates two documents', async ({ page }) => {
   });
   expect(result).toEqual({ cancelled: true, width: 794, pages: 2 });
 });
+test('renders zero-boundary text at its transformed position and continues painting', async ({ page }) => {
+  const entries = unzipSync(new Uint8Array(readFileSync('public/sample.ofd')));
+  const text = (id: number, boundary: string, y: number) => `<ofd:TextObject ID="${id}" Boundary="${boundary}" Font="1" Size="5" CTM="2 0 0 2 0 0"><ofd:TextCode X="10" Y="${y}">Visible text</ofd:TextCode></ofd:TextObject>`;
+  const makePage = (boundary: string) => strToU8(`<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016"><ofd:Content><ofd:Layer ID="10">${text(11, boundary, 20)}${text(12, '0 0 0 40', 30)}${text(13, '0 0 80 0', 40)}<ofd:PathObject ID="14" Boundary="80 80 10 10" Fill="true" Stroke="false"><ofd:FillColor Value="255 0 0"/><ofd:AbbreviatedData>M 0 0 L 10 0 L 10 10 L 0 10 C</ofd:AbbreviatedData></ofd:PathObject><ofd:PathObject ID="15" Boundary="0 0 0 0" Fill="true"><ofd:AbbreviatedData>M 0 0 L 100 0 L 100 100 C</ofd:AbbreviatedData></ofd:PathObject></ofd:Layer></ofd:Content></ofd:Page>`);
+  entries['Doc_0/Pages/1.xml'] = makePage('0 0 0 0');
+  const zero = zipSync(entries);
+  entries['Doc_0/Pages/1.xml'] = makePage('0 0 100 100');
+  await page.goto('/');
+  const result = await page.evaluate(async ({ zero, normal }) => {
+    // @ts-expect-error Browser imports source through Vite.
+    const { getDocument } = await import('/dist/browser/ofdjs.js');
+    const render = async (bytes: number[]) => {
+      const doc = await getDocument(new Uint8Array(bytes)), p = await doc.getPage(1);
+      const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d')!, viewport = p.getViewport();
+      await p.render({ canvasContext: ctx, viewport, pixelRatio: 1 }).promise;
+      const pixels = [...ctx.getImageData(0, 0, canvas.width, canvas.height).data];
+      const ink = (y: number) => {
+        const data = ctx.getImageData(Math.round(20 * viewport.unit), Math.round(y * viewport.unit), Math.round(60 * viewport.unit), Math.round(10 * viewport.unit)).data;
+        let count = 0; for (let i = 0; i < data.length; i += 4) if (data[i] < 120) count++;
+        return count;
+      };
+      const out = { pixels, ink: [ink(30), ink(50), ink(70)], red: [...ctx.getImageData(Math.round(85 * viewport.unit), Math.round(85 * viewport.unit), 1, 1).data], warnings: doc.diagnostics.filter((d: { code: string }) => d.code === 'ZERO_TEXT_BOUNDARY').length, text: (await p.getTextContent()).items.map((i: { text: string }) => i.text) };
+      doc.destroy(); return out;
+    };
+    const a = await render(zero), b = await render(normal);
+    return { identical: a.pixels.every((v, i) => v === b.pixels[i]), ink: a.ink, red: a.red, warnings: a.warnings, text: a.text };
+  }, { zero: [...zero], normal: [...zipSync(entries)] });
+  expect(result.identical).toBe(true);
+  for (const ink of result.ink) expect(ink).toBeGreaterThan(100);
+  expect(result.red).toEqual([255, 0, 0, 255]);
+  expect(result.warnings).toBe(1);
+  expect(result.text).toEqual(['Visible text', 'Visible text', 'Visible text']);
+  await page.locator('input[type=file]').setInputFiles({ name: 'zero-boundary.ofd', mimeType: 'application/ofd', buffer: Buffer.from(zero) });
+  await expect(page.getByRole('status')).toHaveText('Canvas · 本地渲染');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
 const references = (process.env.OFD_REFERENCE_FILES || process.env.OFD_REFERENCE_FILE || '').split(',');
 for (const reference of references) test(`renders all pages of external sample ${reference.split('/').pop() || '(not supplied)'}`,  async ({ page }, testInfo) => {
   test.skip(!reference || !existsSync(reference), 'Set OFD_REFERENCE_FILE to a local OFD fixture.');

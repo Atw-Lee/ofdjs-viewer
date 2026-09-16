@@ -16,6 +16,12 @@ export function numberAttr(el: Element, name: string, fallback = 0): number {
   return n;
 }
 export type Box = [number, number, number, number];
+/** Object boundaries may have zero extent; page dimensions must be positive. */
+export function boundary(raw: string | null | undefined): Box {
+  const ns = numbers(raw);
+  if (ns.length !== 4 || ns[2] < 0 || ns[3] < 0) throw new Error(`Invalid OFD box: ${raw}`);
+  return ns as Box;
+}
 export function box(raw: string | null | undefined, fallback?: Box): Box {
   const ns = numbers(raw);
   if (!ns.length && fallback) return [...fallback];

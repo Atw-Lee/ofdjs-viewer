@@ -1,5 +1,5 @@
 import { Archive, openArchive, abort, type LoadOptions, type OFDSource } from './archive.js';
-import { box, child, children, descendants, resolvePath, value, type Box } from './xml.js';
+import { boundary, box, child, children, descendants, resolvePath, value, type Box } from './xml.js';
 import { renderPage, type RenderOptions, type RenderTask, type Viewport } from './render.js';
 export interface Diagnostic { code: string; message: string; }
 export interface TextItem { text: string; boundary: Box; font: string; size: number; }
@@ -69,7 +69,7 @@ export class OFDPage {
   render(options: RenderOptions): RenderTask { this.owner.assertAlive(); return this.owner.track(renderPage(this, options, this.owner.warn)); }
   async getTextContent(): Promise<{ items: TextItem[] }> {
     this.owner.assertAlive();
-    return { items: this.contents.flatMap(({ root }) => descendants(root, 'TextObject').map(el => ({ text: descendants(el, 'TextCode').map(t => t.textContent || '').join(''), boundary: box(el.getAttribute('Boundary')), font: el.getAttribute('Font') || '', size: Number(el.getAttribute('Size')) }))) };
+    return { items: this.contents.flatMap(({ root }) => descendants(root, 'TextObject').map(el => ({ text: descendants(el, 'TextCode').map(t => t.textContent || '').join(''), boundary: boundary(el.getAttribute('Boundary')), font: el.getAttribute('Font') || '', size: Number(el.getAttribute('Size')) }))) };
   }
 }
 export class OFDDocument {
