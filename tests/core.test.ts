@@ -55,11 +55,12 @@ describe('OFD archive and page model', () => {
     expect((await (await doc.getPage(1)).getTextContent()).items).toEqual([{ text: 'Retained text', boundary: [0, 0, 0, 0], font: '1', size: 5 }]);
     doc.destroy();
   });
-  it('still rejects zero-size physical pages', async () => {
+  it('uses a valid document size for a damaged page size and rejects an invalid document default', async () => {
     const files = unzipSync(sample);
     files['Doc_0/Pages/1.xml'] = strToU8('<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016"><ofd:Area><ofd:PhysicalBox>0 0 0 0</ofd:PhysicalBox></ofd:Area></ofd:Page>');
     const doc = await getDocument(zipSync(files));
-    await expect(doc.getPage(1)).rejects.toThrow('Invalid OFD box: 0 0 0 0');
+    expect((await doc.getPage(1)).physicalBox).toEqual([0, 0, 210, 297]);
+    expect(doc.diagnostics.some(d => d.code === 'PAGE_AREA')).toBe(true);
     doc.destroy();
     files['Doc_0/Document.xml'] = strToU8(strFromU8(files['Doc_0/Document.xml']).replace('0 0 210 297', '0 0 0 0'));
     await expect(getDocument(zipSync(files))).rejects.toThrow('Invalid OFD box: 0 0 0 0');
