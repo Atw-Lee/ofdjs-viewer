@@ -1,7 +1,11 @@
 import { unzip } from 'fflate';
 import { parseXML, resolvePath } from './xml.js';
 export type OFDSource = string | URL | Blob | ArrayBuffer | Uint8Array;
-export interface LoadOptions { signal?: AbortSignal; maxFileSize?: number; maxUncompressedSize?: number; maxEntries?: number; documentIndex?: number; }
+export interface GlyphFont {
+  path(index: number, size: number): string;
+  advance(index: number, size: number): number;
+}
+export interface LoadOptions { signal?: AbortSignal; maxFileSize?: number; maxUncompressedSize?: number; maxEntries?: number; documentIndex?: number; loadFont?: (bytes: Uint8Array) => Promise<GlyphFont>; }
 export function abort(signal?: AbortSignal): void { signal?.throwIfAborted(); }
 export class Archive {
   private xmlCache = new Map<string, Element>();
