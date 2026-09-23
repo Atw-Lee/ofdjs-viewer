@@ -1,4 +1,4 @@
-import { Archive, openArchive, abort, type LoadOptions, type OFDSource } from './archive.js';
+import { Archive, openArchive, abort, type GlyphFont, type LoadOptions, type OFDSource } from './archive.js';
 import { boundary, box, child, children, descendants, resolvePath, value, type Box } from './xml.js';
 import { renderPage, type RenderOptions, type RenderTask, type Viewport } from './render.js';
 import { SealStore } from './seals.js';
@@ -10,6 +10,7 @@ export class Resources {
   colorSpaces = new Map<string, Element>(); fonts = new Map<string, Element>(); images = new Map<string, string>(); drawParams = new Map<string, Element>();
   private imageFormats = new Map<string, string>();
   private fontPaths = new Map<string, string>(); private loadedFonts = new Map<string, Promise<string>>();
+  private loadedGlyphFonts = new Map<string, Promise<GlyphFont | undefined>>();
   private loadedImages = new Map<string, Promise<ImageBitmap>>(); private maskedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
   private closedImages: WeakSet<ImageBitmap>;
   private namespace = `ofd_${++documentSequence}`;
@@ -59,6 +60,24 @@ export class Resources {
         document.fonts.add(face); this.faces.push(face); return family;
       } catch (error) { if ((error as Error)?.name === 'AbortError') throw error; this.warn('FONT_DECODE', `Unable to load embedded font ${id}; using system font.`); return fallback; }
     })(); this.loadedFonts.set(id, result); return result;
+  }
+  glyphFont(id: string): Promise<GlyphFont | undefined> {
+    if (!this.fonts.has(id) && this.parent) return this.parent.glyphFont(id);
+    let result = this.loadedGlyphFonts.get(id); if (result) return result;
+    result = (async () => {
+      const path = this.fontPaths.get(id);
+      if (!path || !this.options.loadFont) return undefined;
+      try {
+        const font = await this.options.loadFont(this.archive.bytes(path).slice());
+        return this.disposed ? undefined : font;
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') throw error;
+        this.warn('GLYPH_FONT', 'An embedded glyph font could not be decoded; using text fallback.');
+        return undefined;
+      }
+    })();
+    this.loadedGlyphFonts.set(id, result);
+    return result;
   }
   image(id: string): Promise<ImageBitmap> {
     if (!this.images.has(id) && this.parent) return this.parent.image(id);
@@ -115,7 +134,7 @@ export class Resources {
     for (const img of [...this.loadedImages.values(), ...this.maskedImages.values()]) {
       void img.then(bitmap => this.closeImage(bitmap), () => {});
     }
-    this.loadedImages.clear(); this.maskedImages.clear(); this.loadedFonts.clear();
+    this.loadedImages.clear(); this.maskedImages.clear(); this.loadedFonts.clear(); this.loadedGlyphFonts.clear();
   }
 }
 export class OFDPage {
