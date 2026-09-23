@@ -1,6 +1,7 @@
 import { Archive, openArchive, abort, type LoadOptions, type OFDSource } from './archive.js';
 import { boundary, box, child, children, descendants, resolvePath, value, type Box } from './xml.js';
 import { renderPage, type RenderOptions, type RenderTask, type Viewport } from './render.js';
+import { SealStore } from './seals.js';
 export interface Diagnostic { code: string; message: string; }
 export interface TextItem { text: string; boundary: Box; font: string; size: number; }
 export interface PageContent { root: Element; resources: Resources; }
@@ -67,6 +68,9 @@ export class OFDPage {
     return { width: rotation % 180 ? h : w, height: rotation % 180 ? w : h, scale, rotation, unit };
   }
   render(options: RenderOptions): RenderTask { this.owner.assertAlive(); return this.owner.track(renderPage(this, options, this.owner.warn)); }
+  renderSeals(ctx: CanvasRenderingContext2D, unit: number, signal: AbortSignal, maxCanvasPixels: number): Promise<void> {
+    return this.owner.seals.render(this.id, ctx, unit, signal, maxCanvasPixels);
+  }
   async getTextContent(): Promise<{ items: TextItem[] }> {
     this.owner.assertAlive();
     return { items: this.contents.flatMap(({ root }) => descendants(root, 'TextObject').map(el => ({ text: descendants(el, 'TextCode').map(t => t.textContent || '').join(''), boundary: boundary(el.getAttribute('Boundary')), font: el.getAttribute('Font') || '', size: Number(el.getAttribute('Size')) }))) };
@@ -74,11 +78,13 @@ export class OFDPage {
 }
 export class OFDDocument {
   readonly diagnostics: Diagnostic[] = []; readonly metadata: Record<string, string> = {};
+  readonly seals: SealStore;
   readonly numPages: number;
   private pages: Element[]; private pageCache = new Map<number, Promise<OFDPage>>(); private resources: Resources;
   private scopes: Resources[] = []; private templates = new Map<string, Element>(); private tasks = new Set<RenderTask>();
   private destroyed = false; private physicalBox?: Box; private annotationPath: string;
-  constructor(private archive: Archive, private path: string, info?: Element) {
+  constructor(private archive: Archive, private path: string, info?: Element, options: LoadOptions = {}, sealDepth = 0) {
+    this.seals = new SealStore(this, archive, options, sealDepth);
     const doc = archive.xml(path), common = child(doc, 'CommonData');
     if (!common) throw new Error('Missing OFD CommonData');
     const defaultArea = child(common, 'PageArea');
@@ -131,17 +137,26 @@ export class OFDDocument {
     if (!pageBox && !this.physicalBox) throw new Error(`Page ${n} has no PhysicalBox and the document has no default PageArea`);
     return new OFDPage(this, n, entry.getAttribute('ID') || '', box(pageBox, this.physicalBox), contents);
   }
-  destroy() { if (this.destroyed) return; this.destroyed = true; for (const task of this.tasks) task.cancel(); for (const scope of this.scopes) scope.destroy(); this.pageCache.clear(); this.archive.clear(); }
+  destroy() { if (this.destroyed) return; this.destroyed = true; for (const task of this.tasks) task.cancel(); for (const scope of this.scopes) scope.destroy(); this.seals.destroy(); this.pageCache.clear(); this.archive.clear(); }
 }
 export async function getDocument(source: OFDSource, options: LoadOptions = {}): Promise<OFDDocument> {
+  return loadDocument(source, options, 0);
+}
+export async function getSealDocument(source: OFDSource, options: LoadOptions, depth: number): Promise<OFDDocument> {
+  return loadDocument(source, { ...options, documentIndex: 0 }, depth);
+}
+async function loadDocument(source: OFDSource, options: LoadOptions, depth: number): Promise<OFDDocument> {
   const archive = await openArchive(source, options);
   try {
     abort(options.signal);
     const root = archive.xml('OFD.xml'); if (root.localName !== 'OFD') throw new Error('Invalid OFD root');
     const bodies = children(root, 'DocBody'), index = options.documentIndex ?? 0;
     if (!Number.isInteger(index) || index < 0 || !bodies[index]) throw new Error('OFD document index out of range');
-    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'));
-    if (value(body, 'Signatures')) doc.warn('SIGNATURE_UNSUPPORTED', 'Digital signatures and embedded seals are not rendered or verified.');
+    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'), options, depth);
+    if (value(body, 'Signatures')) {
+      doc.warn('SIGNATURE_NOT_VERIFIED', 'Electronic seal appearances are rendered without verifying digital signatures.');
+      doc.seals.load(resolvePath('OFD.xml', value(body, 'Signatures')));
+    }
     if (bodies.length > 1) doc.warn('MULTI_DOCUMENT', `Archive has ${bodies.length} documents; selected index ${index}.`);
     return doc;
   } catch (error) { archive.clear(); throw error; }
