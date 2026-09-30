@@ -26,10 +26,18 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
       for (const { root, resources } of page.contents) {
         for (const el of [root, ...Array.from(root.getElementsByTagName('*'))]) {
           signal.throwIfAborted();
-          if (el.localName === 'TextObject') { fontNames.set(el, await resources.font(el.getAttribute('Font') || '')); signal.throwIfAborted(); }
+          if (el.localName === 'TextObject') {
+            try { fontNames.set(el, await resources.font(el.getAttribute('Font') || '')); }
+            catch (error) {
+              signal.throwIfAborted();
+              if ((error as Error)?.name === 'AbortError') throw error;
+              warn('FONT_DECODE', `Font ${el.getAttribute('Font')} could not be loaded; using a local fallback.`);
+            }
+            signal.throwIfAborted();
+          }
           if (el.localName === 'ImageObject') {
             try { images.set(el, await resources.image(el.getAttribute('ResourceID') || '')); }
-            catch (e) { signal.throwIfAborted(); warn('IMAGE_DECODE', `Image ${el.getAttribute('ResourceID')} could not be decoded (PNG/JPEG/WebP supported): ${String(e)}`); }
+            catch (e) { signal.throwIfAborted(); if ((e as Error)?.name === 'AbortError') throw e; warn('IMAGE_DECODE', `Image ${el.getAttribute('ResourceID')} could not be decoded (PNG/JPEG/WebP supported): ${String(e)}`); }
             signal.throwIfAborted();
           }
         }
@@ -52,9 +60,9 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
           const type = el.localName;
           if (['Area', 'Template', 'PageRes', 'Actions'].includes(type)) return;
           if (['CompositeObject', 'VideoObject'].includes(type)) { warn(`UNSUPPORTED_${type}`, `${type} is not supported.`); return; }
-          const chain = [...inherited, ...paramChain(resources, el.getAttribute('DrawParam')), el];
           ctx.save();
           try {
+            const chain = [...inherited, ...paramChain(resources, el.getAttribute('DrawParam')), el];
             if (el.hasAttribute('Boundary') && (type.endsWith('Object') || type === 'Appearance')) {
               const [x, y, w, h] = boundary(el.getAttribute('Boundary')); ctx.translate(x, y);
               if (type === 'TextObject' && (w === 0 || h === 0)) {
@@ -101,6 +109,10 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
               if (type === 'Content') nodes = nodes.map((node, index) => ({ node, index })).sort((a, b) => layerOrder(a.node) - layerOrder(b.node) || a.index - b.index).map(x => x.node);
               for (const nested of nodes) await paint(nested, resources, chain);
             }
+          } catch (error) {
+            signal.throwIfAborted();
+            if ((error as Error)?.name === 'AbortError') throw error;
+            warn('OBJECT_RENDER', `${type} ${el.getAttribute('ID') || ''} could not be rendered; continuing with the remaining page content.`);
           } finally { ctx.restore(); }
         };
         for (const { root, resources } of page.contents) await paint(root, resources);
@@ -148,6 +160,8 @@ function applyStyle(ctx: CanvasRenderingContext2D, chain: Element[], resources: 
 function applyClips(ctx: CanvasRenderingContext2D, el: Element, warn: Warn) {
   const clips = child(el, 'Clips'); if (!clips) return;
   for (const clip of children(clips, 'Clip')) {
+    if (children(clip, 'Area').flatMap(area => children(area, 'Path')).length > 1)
+      warn('CLIP_UNION_APPROXIMATION', 'Overlapping clip regions may not preserve independent fill rules.');
     const combined = new Path2D(); let supported = false, rule: CanvasFillRule = 'nonzero';
     for (const area of children(clip, 'Area')) {
       const matrix = new DOMMatrix(); const ac = numbers(area.getAttribute('CTM'));

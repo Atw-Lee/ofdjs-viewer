@@ -11,7 +11,14 @@ export class Resources {
   private loadedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
   private namespace = `ofd_${++documentSequence}`;
   constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources) {}
-  load(path: string) {
+  load(path: string, reference?: string) {
+    try { this.loadResource(reference === undefined ? path : resolvePath(path, reference)); }
+    catch (error) {
+      if ((error as Error)?.name === 'AbortError') throw error;
+      this.warn('RESOURCE_PARSE', 'A resource catalog could not be read; other content is retained.');
+    }
+  }
+  private loadResource(path: string) {
     if (!this.archive.has(path)) { this.warn('MISSING_RESOURCE', `Referenced resource file is absent: ${path}`); return; }
     const root = this.archive.xml(path);
     const base = resolvePath(path, `${root.getAttribute('BaseLoc') || '.'}/__resource__`);
@@ -40,7 +47,7 @@ export class Resources {
         const face = await new FontFace(family, this.archive.bytes(path).slice().buffer).load();
         if (this.disposed) return fallback;
         document.fonts.add(face); this.faces.push(face); return family;
-      } catch { this.warn('FONT_DECODE', `Unable to load embedded font ${id}; using system font.`); return fallback; }
+      } catch (error) { if ((error as Error)?.name === 'AbortError') throw error; this.warn('FONT_DECODE', `Unable to load embedded font ${id}; using system font.`); return fallback; }
     })(); this.loadedFonts.set(id, result); return result;
   }
   image(id: string): Promise<ImageBitmap> {
@@ -85,7 +92,7 @@ export class OFDDocument {
     if (defaultArea) this.physicalBox = box(value(defaultArea, 'PhysicalBox'));
     else this.warn('MISSING_DEFAULT_PAGE_AREA', 'Document has no default PageArea; each page must supply its own PhysicalBox.');
     this.resources = new Resources(archive, this.warn); this.scopes.push(this.resources);
-    for (const name of ['PublicRes', 'DocumentRes']) for (const res of children(common, name)) this.resources.load(resolvePath(path, res.textContent!.trim()));
+    for (const name of ['PublicRes', 'DocumentRes']) for (const res of children(common, name)) this.resources.load(path, res.textContent!.trim());
     for (const t of children(common, 'TemplatePage')) this.templates.set(t.getAttribute('ID')!, t);
     this.pages = children(child(doc, 'Pages') ?? doc, 'Page'); this.numPages = this.pages.length;
     if (!this.numPages) throw new Error('OFD document contains no pages');
@@ -104,32 +111,64 @@ export class OFDDocument {
   }
   private scope(root: Element, path: string) {
     const resources = new Resources(this.archive, this.warn, this.resources); this.scopes.push(resources);
-    for (const res of children(root, 'PageRes')) resources.load(resolvePath(path, res.textContent!.trim()));
+    for (const res of children(root, 'PageRes')) resources.load(path, res.textContent!.trim());
     return resources;
   }
   private async parsePage(n: number): Promise<OFDPage> {
-    const entry = this.pages[n - 1], path = resolvePath(this.path, entry.getAttribute('BaseLoc') || '');
-    const root = this.archive.xml(path), contents: PageContent[] = [], foreground: PageContent[] = [];
+    const entry = this.pages[n - 1];
+    let path = this.path, root: Element;
+    try {
+      path = resolvePath(this.path, entry.getAttribute('BaseLoc') || '');
+      root = this.archive.xml(path);
+    } catch (error) {
+      if ((error as Error)?.name === 'AbortError' || !this.physicalBox) throw error;
+      this.warn('PAGE_CONTENT', `Page ${n} content could not be read; preserving its place and document page size.`);
+      root = document.createElementNS('http://www.ofdspec.org/2016', 'Page');
+    }
+    const contents: PageContent[] = [], foreground: PageContent[] = [];
     for (const t of children(root, 'Template')) {
-      const template = this.templates.get(t.getAttribute('TemplateID')!);
-      if (!template) { this.warn('MISSING_TEMPLATE', 'A referenced template page is missing.'); continue; }
-      const tp = resolvePath(this.path, template.getAttribute('BaseLoc')!); const tr = this.archive.xml(tp);
-      const content = { root: tr, resources: this.scope(tr, tp) };
-      ((t.getAttribute('ZOrder') || template.getAttribute('ZOrder')) === 'Foreground' ? foreground : contents).push(content);
+      try {
+        const template = this.templates.get(t.getAttribute('TemplateID')!);
+        if (!template) throw new Error('Missing template definition');
+        const tp = resolvePath(this.path, template.getAttribute('BaseLoc')!); const tr = this.archive.xml(tp);
+        const content = { root: tr, resources: this.scope(tr, tp) };
+        ((t.getAttribute('ZOrder') || template.getAttribute('ZOrder')) === 'Foreground' ? foreground : contents).push(content);
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') throw error;
+        this.warn('MISSING_TEMPLATE', 'A referenced template page could not be read; other content is retained.');
+      }
     }
     contents.push({ root, resources: this.scope(root, path) }, ...foreground);
     if (this.annotationPath) {
-      const ap = resolvePath(this.path, this.annotationPath), annots = this.archive.xml(ap);
-      for (const page of children(annots, 'Page')) if (page.getAttribute('PageID') === entry.getAttribute('ID')) {
-        const file = resolvePath(ap, value(page, 'FileLoc')), ar = this.archive.xml(file);
-        for (const annot of children(ar, 'Annot')) if (annot.getAttribute('Visible') !== 'false') {
-          const appearance = child(annot, 'Appearance'); if (appearance) contents.push({ root: appearance, resources: this.resources });
+      try {
+        const ap = resolvePath(this.path, this.annotationPath), annots = this.archive.xml(ap);
+        for (const page of children(annots, 'Page')) {
+          if (page.getAttribute('PageID') !== entry.getAttribute('ID')) continue;
+          try {
+            const file = resolvePath(ap, value(page, 'FileLoc')), ar = this.archive.xml(file);
+            for (const annot of children(ar, 'Annot')) if (annot.getAttribute('Visible') !== 'false') {
+              const appearance = child(annot, 'Appearance'); if (appearance) contents.push({ root: appearance, resources: this.resources });
+            }
+          } catch (error) {
+            if ((error as Error)?.name === 'AbortError') throw error;
+            this.warn('ANNOTATION_CONTENT', 'An annotation could not be read; other content is retained.');
+          }
         }
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') throw error;
+        this.warn('ANNOTATION_METADATA', 'Annotation metadata could not be read; other content is retained.');
       }
     }
     const pageArea = child(root, 'Area'), pageBox = pageArea && value(pageArea, 'PhysicalBox');
     if (!pageBox && !this.physicalBox) throw new Error(`Page ${n} has no PhysicalBox and the document has no default PageArea`);
-    return new OFDPage(this, n, entry.getAttribute('ID') || '', box(pageBox, this.physicalBox), contents);
+    let physicalBox: Box;
+    try { physicalBox = box(pageBox, this.physicalBox); }
+    catch (error) {
+      if (!this.physicalBox) throw error;
+      physicalBox = this.physicalBox;
+      this.warn('PAGE_AREA', 'Invalid page area; using the document page size.');
+    }
+    return new OFDPage(this, n, entry.getAttribute('ID') || '', physicalBox, contents);
   }
   destroy() { if (this.destroyed) return; this.destroyed = true; for (const task of this.tasks) task.cancel(); for (const scope of this.scopes) scope.destroy(); this.pageCache.clear(); this.archive.clear(); }
 }
