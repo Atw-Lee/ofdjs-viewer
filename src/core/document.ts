@@ -7,10 +7,15 @@ export interface PageContent { root: Element; resources: Resources; }
 let documentSequence = 0;
 export class Resources {
   colorSpaces = new Map<string, Element>(); fonts = new Map<string, Element>(); images = new Map<string, string>(); drawParams = new Map<string, Element>();
+  private imageFormats = new Map<string, string>();
   private fontPaths = new Map<string, string>(); private loadedFonts = new Map<string, Promise<string>>();
-  private loadedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
+  private loadedImages = new Map<string, Promise<ImageBitmap>>(); private maskedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
+  private closedImages: WeakSet<ImageBitmap>;
   private namespace = `ofd_${++documentSequence}`;
-  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources) {}
+  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources, private options: LoadOptions = parent?.options ?? {}) {
+    // Page masks may retain an image owned by a parent resource catalog.
+    this.closedImages = parent?.closedImages ?? new WeakSet();
+  }
   load(path: string, reference?: string) {
     try { this.loadResource(reference === undefined ? path : resolvePath(path, reference)); }
     catch (error) {
@@ -27,7 +32,11 @@ export class Resources {
       if (value(font, 'FontFile')) this.fontPaths.set(id, resolvePath(base, value(font, 'FontFile')));
     }
     for (const media of descendants(root, 'MultiMedia')) {
-      if (media.getAttribute('Type') === 'Image') this.images.set(media.getAttribute('ID')!, resolvePath(base, value(media, 'MediaFile')));
+      if (media.getAttribute('Type') === 'Image') {
+        const id = media.getAttribute('ID')!, file = value(media, 'MediaFile');
+        this.images.set(id, resolvePath(base, file));
+        this.imageFormats.set(id, media.getAttribute('Format') || file.split('.').pop() || '');
+      }
     }
     for (const param of descendants(root, 'DrawParam')) this.drawParams.set(param.getAttribute('ID')!, param);
     for (const space of descendants(root, 'ColorSpace')) this.colorSpaces.set(space.getAttribute('ID')!, space);
@@ -56,12 +65,57 @@ export class Resources {
     result = (async () => {
       const path = this.images.get(id); if (!path) throw new Error(`Missing image resource: ${id}`);
       const data = this.archive.bytes(path).slice();
-      const bitmap = await createImageBitmap(new Blob([data.buffer]));
-      if (this.disposed) { bitmap.close(); throw new Error('OFD document destroyed'); }
+      const bitmap = this.options.decodeImage
+        ? await this.options.decodeImage(data, this.imageFormats.get(id) || '')
+        : await createImageBitmap(new Blob([data.buffer]));
+      if (this.disposed) { this.closeImage(bitmap); throw new Error('OFD document destroyed'); }
       return bitmap;
     })(); this.loadedImages.set(id, result); return result;
   }
-  destroy() { this.disposed = true; for (const face of this.faces) document.fonts.delete(face); for (const img of this.loadedImages.values()) void img.then(b => b.close(), () => {}); this.loadedImages.clear(); this.loadedFonts.clear(); }
+  imageWithMask(id: string, maskID: string | null): Promise<ImageBitmap> {
+    if (!maskID) return this.image(id);
+    const key = JSON.stringify([id, maskID]);
+    let result = this.maskedImages.get(key); if (result) return result;
+    result = (async () => {
+      const image = await this.image(id);
+      let canvas: HTMLCanvasElement | undefined;
+      try {
+        const mask = await this.image(maskID);
+        // OFD requires matching dimensions; resampling malformed masks can remove valid content.
+        if (image.width !== mask.width || image.height !== mask.height) throw new Error('Image mask dimensions differ');
+        const { width, height } = image;
+        if (width * height > 16_000_000) throw new Error('Image mask pixel limit exceeded');
+        canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) throw new Error('Image mask canvas unavailable');
+        ctx.drawImage(mask, 0, 0);
+        const maskPixels = ctx.getImageData(0, 0, width, height).data;
+        ctx.clearRect(0, 0, width, height); ctx.drawImage(image, 0, 0);
+        const pixels = ctx.getImageData(0, 0, width, height);
+        for (let i = 0; i < pixels.data.length; i += 4) if (maskPixels[i] < 128) pixels.data[i + 3] = 0;
+        ctx.putImageData(pixels, 0, 0);
+        const bitmap = await createImageBitmap(canvas);
+        if (this.disposed) { this.closeImage(bitmap); throw new Error('OFD document destroyed'); }
+        return bitmap;
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError' || this.disposed) throw error;
+        this.warn('IMAGE_MASK', 'An image mask could not be applied; retaining the original image.');
+        return image;
+      } finally { if (canvas) { canvas.width = 0; canvas.height = 0; } }
+    })(); this.maskedImages.set(key, result); return result;
+  }
+  private closeImage(bitmap: ImageBitmap) {
+    if (this.closedImages.has(bitmap)) return;
+    this.closedImages.add(bitmap); bitmap.close();
+  }
+  destroy() {
+    this.disposed = true;
+    for (const face of this.faces) document.fonts.delete(face);
+    for (const img of [...this.loadedImages.values(), ...this.maskedImages.values()]) {
+      void img.then(bitmap => this.closeImage(bitmap), () => {});
+    }
+    this.loadedImages.clear(); this.maskedImages.clear(); this.loadedFonts.clear();
+  }
 }
 export class OFDPage {
   constructor(private owner: OFDDocument, readonly pageNumber: number, readonly id: string, readonly physicalBox: Box, readonly contents: PageContent[]) {}
@@ -85,13 +139,13 @@ export class OFDDocument {
   private pages: Element[]; private pageCache = new Map<number, Promise<OFDPage>>(); private resources: Resources;
   private scopes: Resources[] = []; private templates = new Map<string, Element>(); private tasks = new Set<RenderTask>();
   private destroyed = false; private physicalBox?: Box; private annotationPath: string;
-  constructor(private archive: Archive, private path: string, info?: Element) {
+  constructor(private archive: Archive, private path: string, info?: Element, options: LoadOptions = {}) {
     const doc = archive.xml(path), common = child(doc, 'CommonData');
     if (!common) throw new Error('Missing OFD CommonData');
     const defaultArea = child(common, 'PageArea');
     if (defaultArea) this.physicalBox = box(value(defaultArea, 'PhysicalBox'));
     else this.warn('MISSING_DEFAULT_PAGE_AREA', 'Document has no default PageArea; each page must supply its own PhysicalBox.');
-    this.resources = new Resources(archive, this.warn); this.scopes.push(this.resources);
+    this.resources = new Resources(archive, this.warn, undefined, options); this.scopes.push(this.resources);
     for (const name of ['PublicRes', 'DocumentRes']) for (const res of children(common, name)) this.resources.load(path, res.textContent!.trim());
     for (const t of children(common, 'TemplatePage')) this.templates.set(t.getAttribute('ID')!, t);
     this.pages = children(child(doc, 'Pages') ?? doc, 'Page'); this.numPages = this.pages.length;
@@ -179,7 +233,7 @@ export async function getDocument(source: OFDSource, options: LoadOptions = {}):
     const root = archive.xml('OFD.xml'); if (root.localName !== 'OFD') throw new Error('Invalid OFD root');
     const bodies = children(root, 'DocBody'), index = options.documentIndex ?? 0;
     if (!Number.isInteger(index) || index < 0 || !bodies[index]) throw new Error('OFD document index out of range');
-    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'));
+    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'), options);
     if (value(body, 'Signatures')) doc.warn('SIGNATURE_UNSUPPORTED', 'Digital signatures and embedded seals are not rendered or verified.');
     if (bodies.length > 1) doc.warn('MULTI_DOCUMENT', `Archive has ${bodies.length} documents; selected index ${index}.`);
     return doc;

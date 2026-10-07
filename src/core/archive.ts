@@ -1,7 +1,7 @@
 import { unzip } from 'fflate';
 import { parseXML, resolvePath } from './xml.js';
 export type OFDSource = string | URL | Blob | ArrayBuffer | Uint8Array;
-export interface LoadOptions { signal?: AbortSignal; maxFileSize?: number; maxUncompressedSize?: number; maxEntries?: number; documentIndex?: number; }
+export interface LoadOptions { signal?: AbortSignal; maxFileSize?: number; maxUncompressedSize?: number; maxEntries?: number; documentIndex?: number; decodeImage?: (bytes: Uint8Array, format: string) => Promise<ImageBitmap>; }
 export function abort(signal?: AbortSignal): void { signal?.throwIfAborted(); }
 export class Archive {
   private xmlCache = new Map<string, Element>();
