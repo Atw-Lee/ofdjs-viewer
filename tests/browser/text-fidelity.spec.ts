@@ -53,3 +53,59 @@ test('keeps DeltaY-only text vertical and uses the preceding TextCode origin', a
   for (const index of [7, 8, 9, 10, 11, 12, 13]) expect(result.loaded).toContain(index);
   expect(result.diagnostics).not.toContain('GLYPH_TRANSFORM');
 });
+
+for (const failure of ['path', 'advance', 'nan', 'infinity', 'abort', 'explicit'] as const) {
+  test(`handles ${failure} while preparing mapped glyphs`, async ({ page }) => {
+    const entries = unzipSync(new Uint8Array(readFileSync('public/sample.ofd')));
+    entries['Doc_0/PublicRes.xml'] = strToU8(`<ofd:Res xmlns:ofd="http://www.ofdspec.org/2016" BaseLoc="Res"><ofd:Fonts><ofd:Font ID="1" FontName="Arial"><ofd:FontFile>mock.ttf</ofd:FontFile></ofd:Font></ofd:Fonts></ofd:Res>`);
+    entries['Doc_0/Res/mock.ttf'] = new Uint8Array(32);
+    entries['Doc_0/Pages/1.xml'] = strToU8(`<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016"><ofd:Content><ofd:Layer ID="10"><ofd:TextObject ID="11" Boundary="0 0 100 100" Font="1" Size="5" HScale="1.5" ReadDirection="90" CharDirection="90"><ofd:CGTransform CodePosition="0" CodeCount="2" GlyphCount="3"><ofd:Glyphs>7 8 9</ofd:Glyphs></ofd:CGTransform><ofd:TextCode X="20" Y="20" ${failure === 'explicit' ? 'DeltaY="8 8"' : ''}>WX</ofd:TextCode></ofd:TextObject></ofd:Layer></ofd:Content></ofd:Page>`);
+    await page.goto('/');
+    const result = await page.evaluate(async ({ bytes, failure }) => {
+      // @ts-expect-error Browser imports the source through Vite.
+      const { getDocument } = await import('/src/index.ts');
+      let advances = 0;
+      const doc = await getDocument(new Uint8Array(bytes), { loadFont: async () => ({
+        path: (index: number) => {
+          if (failure === 'path' && index === 8) throw new Error('Broken outline');
+          return 'M 0 0 L 4 0 L 4 -4 L 0 -4 Z';
+        },
+        advance: (index: number) => {
+          advances++;
+          if (failure === 'explicit') throw new Error('Explicit spacing must not request metrics');
+          if (index !== 8) return 4;
+          if (failure === 'nan') return NaN;
+          if (failure === 'infinity') return Infinity;
+          if (failure === 'abort') throw new DOMException('Cancelled metrics', 'AbortError');
+          throw new Error('Broken metrics');
+        }
+      }) });
+      const fallback = await getDocument(new Uint8Array(bytes));
+      try {
+        const output = [];
+        for (const scale of [1, 2]) {
+          const render = async (document: typeof doc) => {
+            const ofdPage = await document.getPage(1), viewport = ofdPage.getViewport({ scale });
+            const canvas = window.document.createElement('canvas'), ctx = canvas.getContext('2d')!;
+            let state = 'resolved';
+            try { await ofdPage.render({ canvasContext: ctx, viewport, pixelRatio: 1 }).promise; }
+            catch (error) { state = (error as Error).name; }
+            return { state, pixels: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
+          };
+          const actual = await render(doc), expected = await render(fallback);
+          output.push({ state: actual.state, same: actual.pixels.every((value, i) => value === expected.pixels[i]),
+            ink: actual.pixels.some((value, i) => i % 4 !== 3 && value < 128) });
+        }
+        return { output, advances, diagnostics: doc.diagnostics.map((d: { code: string }) => d.code) };
+      } finally { doc.destroy(); fallback.destroy(); }
+    }, { bytes: [...zipSync(entries)], failure });
+    for (const actual of result.output) {
+      if (failure === 'abort') expect(actual.state).toBe('AbortError');
+      else expect(actual).toEqual({ state: 'resolved', same: failure !== 'explicit', ink: true });
+    }
+    if (failure === 'explicit') expect(result.advances).toBe(0);
+    if (failure === 'abort' || failure === 'explicit') expect(result.diagnostics).not.toContain('GLYPH_RENDER');
+    else expect(result.diagnostics).toContain('GLYPH_RENDER');
+    expect(result.diagnostics).not.toContain('OBJECT_RENDER');
+  });
+}
