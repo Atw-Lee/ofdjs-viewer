@@ -10,8 +10,12 @@ export class Resources {
   private imageFormats = new Map<string, string>();
   private fontPaths = new Map<string, string>(); private loadedFonts = new Map<string, Promise<string>>();
   private loadedImages = new Map<string, Promise<ImageBitmap>>(); private maskedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
+  private closedImages: WeakSet<ImageBitmap>;
   private namespace = `ofd_${++documentSequence}`;
-  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources, private options: LoadOptions = parent?.options ?? {}) {}
+  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources, private options: LoadOptions = parent?.options ?? {}) {
+    // Page masks may retain an image owned by a parent resource catalog.
+    this.closedImages = parent?.closedImages ?? new WeakSet();
+  }
   load(path: string, reference?: string) {
     try { this.loadResource(reference === undefined ? path : resolvePath(path, reference)); }
     catch (error) {
@@ -64,7 +68,7 @@ export class Resources {
       const bitmap = this.options.decodeImage
         ? await this.options.decodeImage(data, this.imageFormats.get(id) || '')
         : await createImageBitmap(new Blob([data.buffer]));
-      if (this.disposed) { bitmap.close(); throw new Error('OFD document destroyed'); }
+      if (this.disposed) { this.closeImage(bitmap); throw new Error('OFD document destroyed'); }
       return bitmap;
     })(); this.loadedImages.set(id, result); return result;
   }
@@ -91,7 +95,7 @@ export class Resources {
         for (let i = 0; i < pixels.data.length; i += 4) if (maskPixels[i] < 128) pixels.data[i + 3] = 0;
         ctx.putImageData(pixels, 0, 0);
         const bitmap = await createImageBitmap(canvas);
-        if (this.disposed) { bitmap.close(); throw new Error('OFD document destroyed'); }
+        if (this.disposed) { this.closeImage(bitmap); throw new Error('OFD document destroyed'); }
         return bitmap;
       } catch (error) {
         if ((error as Error)?.name === 'AbortError' || this.disposed) throw error;
@@ -100,12 +104,15 @@ export class Resources {
       } finally { if (canvas) { canvas.width = 0; canvas.height = 0; } }
     })(); this.maskedImages.set(key, result); return result;
   }
+  private closeImage(bitmap: ImageBitmap) {
+    if (this.closedImages.has(bitmap)) return;
+    this.closedImages.add(bitmap); bitmap.close();
+  }
   destroy() {
     this.disposed = true;
     for (const face of this.faces) document.fonts.delete(face);
-    const closed = new WeakSet<ImageBitmap>();
     for (const img of [...this.loadedImages.values(), ...this.maskedImages.values()]) {
-      void img.then(bitmap => { if (!closed.has(bitmap)) { closed.add(bitmap); bitmap.close(); } }, () => {});
+      void img.then(bitmap => this.closeImage(bitmap), () => {});
     }
     this.loadedImages.clear(); this.maskedImages.clear(); this.loadedFonts.clear();
   }
