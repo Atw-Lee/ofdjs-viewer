@@ -1,4 +1,4 @@
-import { Archive, openArchive, abort, type LoadOptions, type OFDSource } from './archive.js';
+import { Archive, openArchive, abort, type GlyphFont, type LoadOptions, type OFDSource } from './archive.js';
 import { boundary, box, child, children, descendants, resolvePath, value, type Box } from './xml.js';
 import { renderPage, type RenderOptions, type RenderTask, type Viewport } from './render.js';
 export interface Diagnostic { code: string; message: string; }
@@ -8,9 +8,10 @@ let documentSequence = 0;
 export class Resources {
   colorSpaces = new Map<string, Element>(); fonts = new Map<string, Element>(); images = new Map<string, string>(); drawParams = new Map<string, Element>();
   private fontPaths = new Map<string, string>(); private loadedFonts = new Map<string, Promise<string>>();
+  private loadedGlyphFonts = new Map<string, Promise<GlyphFont | undefined>>();
   private loadedImages = new Map<string, Promise<ImageBitmap>>(); private faces: FontFace[] = []; private disposed = false;
   private namespace = `ofd_${++documentSequence}`;
-  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources) {}
+  constructor(private archive: Archive, private warn: (code: string, message: string) => void, readonly parent?: Resources, private options: LoadOptions = parent?.options ?? {}) {}
   load(path: string, reference?: string) {
     try { this.loadResource(reference === undefined ? path : resolvePath(path, reference)); }
     catch (error) {
@@ -50,6 +51,24 @@ export class Resources {
       } catch (error) { if ((error as Error)?.name === 'AbortError') throw error; this.warn('FONT_DECODE', `Unable to load embedded font ${id}; using system font.`); return fallback; }
     })(); this.loadedFonts.set(id, result); return result;
   }
+  glyphFont(id: string): Promise<GlyphFont | undefined> {
+    if (!this.fonts.has(id) && this.parent) return this.parent.glyphFont(id);
+    let result = this.loadedGlyphFonts.get(id); if (result) return result;
+    result = (async () => {
+      const path = this.fontPaths.get(id);
+      if (!path || !this.options.loadFont) return undefined;
+      try {
+        const font = await this.options.loadFont(this.archive.bytes(path).slice());
+        return this.disposed ? undefined : font;
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') throw error;
+        this.warn('GLYPH_FONT', 'An embedded glyph font could not be decoded; using text fallback.');
+        return undefined;
+      }
+    })();
+    this.loadedGlyphFonts.set(id, result);
+    return result;
+  }
   image(id: string): Promise<ImageBitmap> {
     if (!this.images.has(id) && this.parent) return this.parent.image(id);
     let result = this.loadedImages.get(id); if (result) return result;
@@ -61,7 +80,7 @@ export class Resources {
       return bitmap;
     })(); this.loadedImages.set(id, result); return result;
   }
-  destroy() { this.disposed = true; for (const face of this.faces) document.fonts.delete(face); for (const img of this.loadedImages.values()) void img.then(b => b.close(), () => {}); this.loadedImages.clear(); this.loadedFonts.clear(); }
+  destroy() { this.disposed = true; for (const face of this.faces) document.fonts.delete(face); for (const img of this.loadedImages.values()) void img.then(b => b.close(), () => {}); this.loadedImages.clear(); this.loadedFonts.clear(); this.loadedGlyphFonts.clear(); }
 }
 export class OFDPage {
   constructor(private owner: OFDDocument, readonly pageNumber: number, readonly id: string, readonly physicalBox: Box, readonly contents: PageContent[]) {}
@@ -85,13 +104,13 @@ export class OFDDocument {
   private pages: Element[]; private pageCache = new Map<number, Promise<OFDPage>>(); private resources: Resources;
   private scopes: Resources[] = []; private templates = new Map<string, Element>(); private tasks = new Set<RenderTask>();
   private destroyed = false; private physicalBox?: Box; private annotationPath: string;
-  constructor(private archive: Archive, private path: string, info?: Element) {
+  constructor(private archive: Archive, private path: string, info?: Element, options: LoadOptions = {}) {
     const doc = archive.xml(path), common = child(doc, 'CommonData');
     if (!common) throw new Error('Missing OFD CommonData');
     const defaultArea = child(common, 'PageArea');
     if (defaultArea) this.physicalBox = box(value(defaultArea, 'PhysicalBox'));
     else this.warn('MISSING_DEFAULT_PAGE_AREA', 'Document has no default PageArea; each page must supply its own PhysicalBox.');
-    this.resources = new Resources(archive, this.warn); this.scopes.push(this.resources);
+    this.resources = new Resources(archive, this.warn, undefined, options); this.scopes.push(this.resources);
     for (const name of ['PublicRes', 'DocumentRes']) for (const res of children(common, name)) this.resources.load(path, res.textContent!.trim());
     for (const t of children(common, 'TemplatePage')) this.templates.set(t.getAttribute('ID')!, t);
     this.pages = children(child(doc, 'Pages') ?? doc, 'Page'); this.numPages = this.pages.length;
@@ -179,7 +198,7 @@ export async function getDocument(source: OFDSource, options: LoadOptions = {}):
     const root = archive.xml('OFD.xml'); if (root.localName !== 'OFD') throw new Error('Invalid OFD root');
     const bodies = children(root, 'DocBody'), index = options.documentIndex ?? 0;
     if (!Number.isInteger(index) || index < 0 || !bodies[index]) throw new Error('OFD document index out of range');
-    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'));
+    const body = bodies[index], doc = new OFDDocument(archive, resolvePath('OFD.xml', value(body, 'DocRoot')), child(body, 'DocInfo'), options);
     if (value(body, 'Signatures')) doc.warn('SIGNATURE_UNSUPPORTED', 'Digital signatures and embedded seals are not rendered or verified.');
     if (bodies.length > 1) doc.warn('MULTI_DOCUMENT', `Archive has ${bodies.length} documents; selected index ${index}.`);
     return doc;

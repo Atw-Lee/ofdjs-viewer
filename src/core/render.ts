@@ -1,4 +1,5 @@
 import type { OFDPage, Resources } from './document.js';
+import type { GlyphFont } from './archive.js';
 import { boundary, child, children, colorNumbers, expandDeltas, numberAttr, numbers, value } from './xml.js';
 import { drawPath } from './path.js';
 export interface Viewport { width: number; height: number; scale: number; rotation: number; unit: number; }
@@ -22,15 +23,18 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
     busy.add(canvas);
     try {
       // Await resources before touching the destination. Recheck cancellation after every await.
-      const fontNames = new Map<Element, string>(), images = new Map<Element, ImageBitmap>();
+      const fontNames = new Map<Element, string>(), glyphFonts = new Map<Element, GlyphFont | undefined>(), images = new Map<Element, ImageBitmap>();
       for (const { root, resources } of page.contents) {
         for (const el of [root, ...Array.from(root.getElementsByTagName('*'))]) {
           signal.throwIfAborted();
           if (el.localName === 'TextObject') {
-            try { fontNames.set(el, await resources.font(el.getAttribute('Font') || '')); }
-            catch (error) {
+            try {
+              const id = el.getAttribute('Font') || '';
+              fontNames.set(el, await resources.font(id));
               signal.throwIfAborted();
-              if ((error as Error)?.name === 'AbortError') throw error;
+              if (child(el, 'CGTransform')) glyphFonts.set(el, await resources.glyphFont(id));
+            } catch (error) {
+              rethrowAbort(signal, error);
               warn('FONT_DECODE', `Font ${el.getAttribute('Font')} could not be loaded; using a local fallback.`);
             }
             signal.throwIfAborted();
@@ -78,23 +82,69 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
             applyStyle(ctx, chain, resources, warn);
             applyClips(ctx, el, warn);
             if (type === 'TextObject') {
-              if (child(el, 'CGTransform')) warn('GLYPH_TRANSFORM', 'Explicit glyph substitution is not supported.');
-              if (numberAttr(el, 'ReadDirection') || numberAttr(el, 'CharDirection')) warn('TEXT_DIRECTION', 'Non-default text directions are not supported.');
+              const glyphFont = glyphFonts.get(el);
+              if (child(el, 'CGTransform') && !glyphFont) warn('GLYPH_TRANSFORM', 'Embedded glyph outlines are unavailable; using text as a fallback.');
+              const readDirection = textDirection(el, 'ReadDirection');
+              const charDirection = textDirection(el, 'CharDirection');
               const size = numberAttr(el, 'Size', 3.5);
+              const hScale = numberAttr(el, 'HScale', 1);
               ctx.font = `${el.getAttribute('Italic') === 'true' ? 'italic ' : ''}${el.getAttribute('Weight') || (el.getAttribute('Bold') === 'true' ? '700' : '400')} ${size}px ${fontNames.get(el) || 'sans-serif'}`;
               ctx.textBaseline = 'alphabetic';
-              let x = 0, y = 0;
-              for (const code of children(el, 'TextCode')) {
-                x = numberAttr(code, 'X', x); y = numberAttr(code, 'Y', y);
+              // Omitted X/Y inherit the previous TextCode origin, not its final cursor.
+              let originX = 0, originY = 0;
+              let transforms: Element[] = [];
+              for (const code of children(el)) {
+                if (code.localName === 'CGTransform') { transforms.push(code); continue; }
+                if (code.localName !== 'TextCode') continue;
+                originX = numberAttr(code, 'X', originX);
+                originY = numberAttr(code, 'Y', originY);
+                let x = originX, y = originY;
                 const dx = expandDeltas(code.getAttribute('DeltaX')), dy = expandDeltas(code.getAttribute('DeltaY'));
-                const chars = Array.from(code.textContent || '');
-                for (let i = 0; i < chars.length; i++) {
-                  ctx.save(); ctx.translate(x, y); ctx.scale(numberAttr(el, 'HScale', 1), 1);
-                  if (el.getAttribute('Fill') !== 'false') ctx.fillText(chars[i], 0, 0);
-                  if (el.getAttribute('Stroke') === 'true') ctx.strokeText(chars[i], 0, 0);
-                  ctx.restore();
-                  x += dx[i] ?? (dx.length ? dx[dx.length - 1] : ctx.measureText(chars[i]).width * numberAttr(el, 'HScale', 1));
-                  y += dy[i] ?? (dy.length ? dy[dy.length - 1] : 0);
+                const naturalSpacing = !code.hasAttribute('DeltaX') && !code.hasAttribute('DeltaY');
+                // Prepare the entire run before painting: a later outline or metric
+                // failure must not leave earlier mapped glyphs on the canvas.
+                const prepare = (glyph: Glyph) => {
+                  const outline = glyph.index === undefined ? undefined : new Path2D(glyphFont!.path(glyph.index, size));
+                  const advance = naturalSpacing
+                    ? (glyph.index === undefined ? ctx.measureText(glyph.text).width : glyphFont!.advance(glyph.index, size)) * hScale
+                    : 0;
+                  if (!Number.isFinite(advance)) throw new Error('Invalid glyph advance');
+                  return { text: glyph.text, outline, advance };
+                };
+                let glyphs;
+                try {
+                  glyphs = glyphRun(code, transforms, glyphFont, warn).map(prepare);
+                } catch (error) {
+                  rethrowAbort(signal, error);
+                  warn('GLYPH_RENDER', 'An embedded glyph could not be drawn; using text as a fallback.');
+                  glyphs = Array.from(code.textContent || '').map(text => prepare({ text }));
+                }
+                transforms = [];
+                if (naturalSpacing && glyphs.length > 1) warn('TEXT_POSITION_FALLBACK', 'Text has no explicit glyph advances; using local font metrics.');
+                for (let i = 0; i < glyphs.length; i++) {
+                  const { text, outline, advance } = glyphs[i];
+                  ctx.save();
+                  try {
+                    ctx.translate(x, y);
+                    ctx.rotate(charDirection * Math.PI / 180);
+                    ctx.scale(hScale, 1);
+                    if (outline) {
+                      if (el.getAttribute('Fill') !== 'false') ctx.fill(outline);
+                      if (el.getAttribute('Stroke') === 'true') ctx.stroke(outline);
+                    } else {
+                      if (el.getAttribute('Fill') !== 'false') ctx.fillText(text, 0, 0);
+                      if (el.getAttribute('Stroke') === 'true') ctx.strokeText(text, 0, 0);
+                    }
+                  } finally { ctx.restore(); }
+                  if (naturalSpacing) {
+                    if (readDirection === 0) x += advance;
+                    else if (readDirection === 90) y += advance;
+                    else if (readDirection === 180) x -= advance;
+                    else y -= advance;
+                  } else {
+                    x += dx[i] ?? (dx.length ? dx[dx.length - 1] : 0);
+                    y += dy[i] ?? (dy.length ? dy[dy.length - 1] : 0);
+                  }
                 }
               }
             } else if (type === 'PathObject') {
@@ -120,6 +170,51 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
     } finally { busy.delete(canvas); }
   })().finally(() => options.signal?.removeEventListener('abort', onAbort));
   return { promise, cancel: () => controller.abort(new DOMException('Rendering cancelled', 'AbortError')) };
+}
+interface Glyph { text: string; index?: number; }
+// CT_Text repeats (CGTransform*, TextCode). Mappings address characters in the
+// following TextCode; DeltaX/Y then address the resulting glyph sequence.
+function glyphRun(code: Element, transforms: Element[], font: GlyphFont | undefined, warn: Warn): Glyph[] {
+  const chars = Array.from(code.textContent || '');
+  const fallback = () => chars.map(text => ({ text }));
+  if (!font || !transforms.length) return fallback();
+  try {
+    const mappings = transforms.map(el => {
+      const start = numberAttr(el, 'CodePosition', -1);
+      const count = numberAttr(el, 'CodeCount', 1);
+      const glyphCount = numberAttr(el, 'GlyphCount', 1);
+      const indices = numbers(value(el, 'Glyphs'));
+      if (!Number.isInteger(start) || start < 0 || !Number.isInteger(count) || count < 1
+          || start + count > chars.length || !Number.isInteger(glyphCount) || glyphCount < 1
+          || indices.length !== glyphCount || indices.some(n => !Number.isInteger(n) || n < 0)) {
+        throw new Error('Invalid glyph mapping');
+      }
+      return { start, count, indices };
+    }).sort((a, b) => a.start - b.start);
+    const result: Glyph[] = [];
+    let offset = 0;
+    for (const mapping of mappings) {
+      if (mapping.start < offset) throw new Error('Overlapping glyph mappings');
+      while (offset < mapping.start) result.push({ text: chars[offset++] });
+      const text = chars.slice(offset, offset + mapping.count).join('');
+      for (let i = 0; i < mapping.indices.length; i++) result.push({ index: mapping.indices[i], text: i === 0 ? text : '' });
+      offset += mapping.count;
+    }
+    while (offset < chars.length) result.push({ text: chars[offset++] });
+    return result;
+  } catch {
+    warn('GLYPH_MAPPING', 'Invalid embedded glyph mapping; using text as a fallback.');
+    return fallback();
+  }
+}
+function rethrowAbort(signal: AbortSignal, error: unknown): void {
+  signal.throwIfAborted();
+  if ((error as Error)?.name === 'AbortError') throw error;
+}
+function textDirection(el: Element, name: string): number {
+  const direction = numberAttr(el, name);
+  if (![0, 90, 180, 270].includes(direction)) throw new Error(`Invalid ${name}`);
+  return direction;
 }
 function layerOrder(el: Element) { return el.getAttribute('Type') === 'Background' ? 0 : el.getAttribute('Type') === 'Foreground' ? 2 : 1; }
 function paramChain(resources: Resources, id: string | null, seen = new Set<string>()): Element[] {
