@@ -100,20 +100,29 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
                 originY = numberAttr(code, 'Y', originY);
                 let x = originX, y = originY;
                 const dx = expandDeltas(code.getAttribute('DeltaX')), dy = expandDeltas(code.getAttribute('DeltaY'));
-                let glyphs = glyphRun(code, transforms, glyphFont, warn);
-                let outlines: (Path2D | undefined)[] = [];
+                const naturalSpacing = !code.hasAttribute('DeltaX') && !code.hasAttribute('DeltaY');
+                // Prepare the entire run before painting: a later outline or metric
+                // failure must not leave earlier mapped glyphs on the canvas.
+                const prepare = (glyph: Glyph) => {
+                  const outline = glyph.index === undefined ? undefined : new Path2D(glyphFont!.path(glyph.index, size));
+                  const advance = naturalSpacing
+                    ? (glyph.index === undefined ? ctx.measureText(glyph.text).width : glyphFont!.advance(glyph.index, size)) * hScale
+                    : 0;
+                  if (!Number.isFinite(advance)) throw new Error('Invalid glyph advance');
+                  return { text: glyph.text, outline, advance };
+                };
+                let glyphs;
                 try {
-                  outlines = glyphs.map(glyph => glyph.index === undefined ? undefined : new Path2D(glyphFont!.path(glyph.index, size)));
+                  glyphs = glyphRun(code, transforms, glyphFont, warn).map(prepare);
                 } catch (error) {
                   rethrowAbort(signal, error);
                   warn('GLYPH_RENDER', 'An embedded glyph could not be drawn; using text as a fallback.');
-                  glyphs = Array.from(code.textContent || '').map(text => ({ text }));
+                  glyphs = Array.from(code.textContent || '').map(text => prepare({ text }));
                 }
                 transforms = [];
-                const naturalSpacing = !code.hasAttribute('DeltaX') && !code.hasAttribute('DeltaY');
                 if (naturalSpacing && glyphs.length > 1) warn('TEXT_POSITION_FALLBACK', 'Text has no explicit glyph advances; using local font metrics.');
                 for (let i = 0; i < glyphs.length; i++) {
-                  const glyph = glyphs[i], outline = outlines[i];
+                  const { text, outline, advance } = glyphs[i];
                   ctx.save();
                   try {
                     ctx.translate(x, y);
@@ -123,16 +132,11 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
                       if (el.getAttribute('Fill') !== 'false') ctx.fill(outline);
                       if (el.getAttribute('Stroke') === 'true') ctx.stroke(outline);
                     } else {
-                      if (el.getAttribute('Fill') !== 'false') ctx.fillText(glyph.text, 0, 0);
-                      if (el.getAttribute('Stroke') === 'true') ctx.strokeText(glyph.text, 0, 0);
+                      if (el.getAttribute('Fill') !== 'false') ctx.fillText(text, 0, 0);
+                      if (el.getAttribute('Stroke') === 'true') ctx.strokeText(text, 0, 0);
                     }
                   } finally { ctx.restore(); }
                   if (naturalSpacing) {
-                    let advance = ctx.measureText(glyph.text).width * hScale;
-                    if (outline) {
-                      try { advance = glyphFont!.advance(glyph.index!, size) * hScale; }
-                      catch (error) { rethrowAbort(signal, error); }
-                    }
                     if (readDirection === 0) x += advance;
                     else if (readDirection === 90) y += advance;
                     else if (readDirection === 180) x -= advance;
