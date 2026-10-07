@@ -116,6 +116,8 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
           } finally { ctx.restore(); }
         };
         for (const { root, resources } of page.contents) await paint(root, resources);
+        await page.renderSeals(ctx, v.unit * pixelRatio, signal, maxCanvasPixels);
+        signal.throwIfAborted();
       } finally { ctx.restore(); }
     } finally { busy.delete(canvas); }
   })().finally(() => options.signal?.removeEventListener('abort', onAbort));
