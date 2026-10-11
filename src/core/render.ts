@@ -36,8 +36,8 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
             signal.throwIfAborted();
           }
           if (el.localName === 'ImageObject') {
-            try { images.set(el, await resources.image(el.getAttribute('ResourceID') || '')); }
-            catch (e) { signal.throwIfAborted(); if ((e as Error)?.name === 'AbortError') throw e; warn('IMAGE_DECODE', `Image ${el.getAttribute('ResourceID')} could not be decoded (PNG/JPEG/WebP supported): ${String(e)}`); }
+            try { images.set(el, await resources.imageWithMask(el.getAttribute('ResourceID') || '', el.getAttribute('ImageMask'))); }
+            catch (e) { signal.throwIfAborted(); if ((e as Error)?.name === 'AbortError') throw e; warn('IMAGE_DECODE', `Image ${el.getAttribute('ResourceID')} could not be decoded: ${String(e)}`); }
             signal.throwIfAborted();
           }
         }
@@ -103,7 +103,7 @@ export function renderPage(page: OFDPage, options: RenderOptions, warn: Warn): R
               if (el.getAttribute('Stroke') !== 'false') ctx.stroke();
             } else if (type === 'ImageObject') {
               const image = images.get(el); if (image) ctx.drawImage(image, 0, 0, 1, 1);
-              if (el.hasAttribute('Mask') || el.hasAttribute('Substitution')) warn('IMAGE_MASK', 'Image masks and substitutions are not supported.');
+              if (el.hasAttribute('Substitution')) warn('IMAGE_SUBSTITUTION', 'Alternate high-resolution image substitutions are not applied.');
             } else {
               let nodes = children(el);
               if (type === 'Content') nodes = nodes.map((node, index) => ({ node, index })).sort((a, b) => layerOrder(a.node) - layerOrder(b.node) || a.index - b.index).map(x => x.node);
